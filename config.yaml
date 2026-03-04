@@ -1,0 +1,4 @@
+industry_keywords:
+  primary:   ["septic", "wastewater", "pumping"]   # at least 1 match
+  secondary: ["tank", "drain", "cleanout"]         # or 2+ matches
+  negative:  ["restaurant", "retail"]               # any match = fail

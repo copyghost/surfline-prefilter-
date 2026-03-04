@@ -1,0 +1,17 @@
+{
+  "name": "surfline-prefilter",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "trigger:dev": "npx trigger.dev@latest dev"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@trigger.dev/build": "^4.4.1",
+    "@trigger.dev/sdk": "^4.4.1",
+    "typescript": "^5.0.0"
+  }
+}
