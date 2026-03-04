@@ -17,8 +17,5 @@ npm-debug.log*
 *.swp
 *.swo
 
-# Trigger.dev (optional; uncomment if you don't want to push task code)
-# trigger/
-
-# Pipeline outputs (optional; uncomment to avoid pushing large CSVs)
-# filtered_output*.csv
+# Pipeline outputs and uploads
+uploads/
