@@ -51,12 +51,64 @@ app.get("/", (req, res) => {
   res.type("text/html").send(`
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Pre-filter Pipeline</title></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pre-filter Pipeline</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    p { color: #555; margin: 0.5rem 0; }
+    button {
+      font-size: 1rem; padding: 0.6rem 1.2rem; margin: 1rem 0;
+      background: #0d6efd; color: #fff; border: none; border-radius: 6px; cursor: pointer;
+    }
+    button:hover { background: #0b5ed7; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #result { margin-top: 1rem; padding: 1rem; border-radius: 8px; }
+    #result.success { background: #d1e7dd; }
+    #result.error { background: #f8d7da; }
+    #result .summary { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; }
+    #result a { color: #0d6efd; }
+    #log { font-size: 0.85rem; margin-top: 0.5rem; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+  </style>
+</head>
 <body>
   <h1>Pre-filter Pipeline</h1>
-  <p>Run the pipeline: <a href="/run">GET /run</a></p>
-  <p>Download last result: <a href="/output">GET /output</a> (CSV)</p>
-  ${lastSummary ? `<p>Last run: ${lastSummary.pass} pass, ${lastSummary.fail} fail, ${lastSummary.review} review (${lastSummary.total} total)</p>` : ""}
+  <p>Run the domain + keyword filter on your input CSV.</p>
+  <button type="button" id="runBtn">Run pipeline</button>
+  <div id="result"></div>
+
+  <script>
+    const runBtn = document.getElementById('runBtn');
+    const resultEl = document.getElementById('result');
+    runBtn.onclick = async function() {
+      runBtn.disabled = true;
+      resultEl.innerHTML = 'Running…';
+      resultEl.className = '';
+      try {
+        const r = await fetch('/run');
+        const data = await r.json();
+        if (data.ok) {
+          const s = data.summary;
+          resultEl.className = 'success';
+          resultEl.innerHTML = '<div class="summary">' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.review + ' review (' + s.total + ' total)</div>' +
+            '<a href="/output">Download filtered_output.csv</a>' +
+            (data.logTail ? '<pre id="log">' + escapeHtml(data.logTail.slice(-800)) + '</pre>' : '');
+        } else {
+          resultEl.className = 'error';
+          resultEl.innerHTML = '<div class="summary">Error</div>' + escapeHtml(data.error || 'Unknown error') +
+            (data.logTail ? '<pre id="log">' + escapeHtml(data.logTail.slice(-800)) + '</pre>' : '');
+        }
+      } catch (e) {
+        resultEl.className = 'error';
+        resultEl.innerHTML = '<div class="summary">Error</div>' + escapeHtml(e.message);
+      }
+      runBtn.disabled = false;
+    };
+    function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  </script>
 </body>
 </html>`);
 });
