@@ -18,7 +18,8 @@ Optional (for Layer 2):
   If no API key provided, Layer 2 uses requests + BeautifulSoup as fallback (free but less reliable)
 
 Input CSV must have at minimum: company_name, domain
-Output CSV adds: domain_status, http_code, redirect_url, industry_match, matched_keywords, homepage_snippet
+Output CSV adds: domain_status, http_code, redirect_url, industry_match, matched_keywords,
+  homepage_snippet, pages_scraped, scraped_text (raw text from homepage + services/about for AI).
 """
 
 import csv
@@ -99,7 +100,9 @@ DEFAULT_CONFIG = {
         "js_render": False,        # Set True for JS-heavy sites (costs more)
         "premium_proxy": False,    # Set True if getting blocked (costs more)
         "autoparse": False,        # We do our own parsing
-    }
+    },
+    "scrape_paths": [],            # Extra paths to scrape (e.g. ["/our-services"])
+    "scrape_max_subpages": 3,     # Max additional pages per domain (homepage + this many)
 }
 
 
@@ -345,14 +348,8 @@ def extract_text_zenrows(url, api_key, config):
         )
         if resp.status_code == 200:
             raw_html = resp.text[:50000]
-            # Extract text from HTML for keyword matching
-            text = re.sub(r'<script[^>]*>.*?</script>', ' ', raw_html, flags=re.DOTALL | re.IGNORECASE)
-            text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
-            text = re.sub(r'<[^>]+>', ' ', text)
-            text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-            text = text.replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
-            text = re.sub(r'\s+', ' ', text).strip()
-            return text[:10000], raw_html
+            text = _html_to_text(raw_html)
+            return (text[:10000] if text else None), raw_html
         else:
             return None, None
     except Exception:
@@ -379,19 +376,104 @@ def extract_text_fallback(url, timeout=10):
             return None, None
 
         raw_html = resp.text[:50000]
-
-        # Basic HTML to text extraction
-        text = re.sub(r'<script[^>]*>.*?</script>', ' ', raw_html, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<[^>]+>', ' ', text)
-        text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-        text = text.replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
-        text = re.sub(r'\s+', ' ', text).strip()
-
-        return text[:10000], raw_html
+        text = _html_to_text(raw_html)
+        return (text[:10000] if text else None), raw_html
 
     except Exception:
         return None, None
+
+
+def _html_to_text(html):
+    """Convert raw HTML to clean text for keyword matching and AI classification."""
+    if not html:
+        return None
+    text = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:10000]
+
+
+# ─── Multi-Page Scraping ───
+
+DEFAULT_SCRAPE_PATHS = [
+    "/services",
+    "/services/",
+    "/about",
+    "/about-us",
+    "/what-we-do",
+]
+
+
+def scrape_subpages(base_url, api_key, config, extra_paths=None):
+    """
+    Scrape additional pages beyond the homepage.
+    Returns dict of {path: text_content} for pages that returned content.
+    Cost: ~$0.001-0.003 per additional page via ZenRows.
+    """
+    paths_to_try = list(DEFAULT_SCRAPE_PATHS)
+    if extra_paths:
+        paths_to_try = extra_paths + paths_to_try
+    config_paths = config.get("scrape_paths", [])
+    if config_paths:
+        paths_to_try = config_paths + paths_to_try
+    seen = set()
+    unique_paths = []
+    for p in paths_to_try:
+        p_clean = p.rstrip("/").lower()
+        if p_clean not in seen:
+            seen.add(p_clean)
+            unique_paths.append(p)
+    max_pages = config.get("scrape_max_subpages", 3)
+    unique_paths = unique_paths[:max_pages]
+
+    results = {}
+    for path in unique_paths:
+        full_url = base_url.rstrip("/") + "/" + path.lstrip("/")
+        if api_key:
+            text, _ = extract_text_zenrows(full_url, api_key, config)
+        else:
+            text, _ = extract_text_fallback(full_url, config["concurrency"]["request_timeout"])
+        if text and len(text.strip()) > 150:
+            results[path] = text
+    return results
+
+
+def build_scraped_text_bundle(homepage_text, subpage_texts):
+    """
+    Combine homepage and subpage texts into a single structured text bundle
+    (raw text for CSV and for AI prompt). Capped for Clay/AI cost.
+    """
+    parts = []
+    if homepage_text:
+        parts.append(f"=== HOMEPAGE ===\n{homepage_text[:3000]}")
+    for path, text in (subpage_texts or {}).items():
+        label = path.strip("/").upper().replace("-", " ").replace("/", " > ")
+        parts.append(f"=== {label} PAGE ===\n{text[:2500]}")
+    bundle = "\n\n".join(parts)
+    return bundle[:8000]
+
+
+# Prompt template for Clay/AI: fill with {scraped_text} and {buy_box_criteria}
+BUY_BOX_PROMPT_TEMPLATE = """You are evaluating whether this company fits our buy-box criteria.
+
+BUY-BOX CRITERIA:
+{buy_box_criteria}
+
+SCRAPED WEBSITE TEXT (homepage + key pages):
+{scraped_text}
+
+Based only on the scraped text above, does this company meet the buy-box criteria? Respond with a short assessment and recommend: PASS, REVIEW, or FAIL with reason."""
+
+
+def build_prompt_for_row(scraped_text, buy_box_criteria):
+    """Fill the standard prompt template. Use scraped_text from CSV and criteria from config or Clay."""
+    return BUY_BOX_PROMPT_TEMPLATE.format(
+        scraped_text=scraped_text or "(no text scraped)",
+        buy_box_criteria=buy_box_criteria or "Primary/secondary keyword match; exclude negative keywords.",
+    )
 
 
 def check_parked(text):
@@ -564,7 +646,7 @@ def match_keywords(text, config):
 
 
 def process_layer2_row(row, api_key, config):
-    """Process a single row through Layer 2: text extraction, keyword match, and company name resolution."""
+    """Process a single row: extract text, keyword match, name resolution, multi-page scrape, and build scraped_text."""
     url = row.get("_normalized_url")
     raw_name = row.get("company_name", "") or row.get("Company Name", "") or ""
 
@@ -575,6 +657,8 @@ def process_layer2_row(row, api_key, config):
             "homepage_snippet": "",
             "resolved_name": raw_name,
             "name_source": "skipped",
+            "scraped_text": "",
+            "pages_scraped": "",
         }
 
     # Extract homepage text + raw HTML
@@ -586,22 +670,32 @@ def process_layer2_row(row, api_key, config):
     else:
         text, raw_html = extract_text_fallback(url, config["concurrency"]["request_timeout"])
 
-    # ── Company Name Resolution (from HTML, $0.00) ──
     resolved_name, name_source = extract_company_name_from_html(raw_html, fallback_name=raw_name)
 
-    # Check if parked
     if check_parked(text):
         row["domain_status"] = "parked"
         return {
             "industry_match": "parked_domain",
             "matched_keywords": "",
             "homepage_snippet": (text or "")[:200],
-            "resolved_name": raw_name,  # Don't trust names from parked pages
+            "resolved_name": raw_name,
             "name_source": "parked_domain",
+            "scraped_text": "",
+            "pages_scraped": "",
         }
 
-    # Keyword matching
     match_result, matched, negatives = match_keywords(text, config)
+
+    # Multi-page scraping: for match/weak_match scrape services/about; else homepage-only bundle
+    scraped_text = ""
+    pages_scraped = "homepage"
+    if match_result in ("match", "weak_match"):
+        subpage_texts = scrape_subpages(url, api_key, config)
+        scraped_text = build_scraped_text_bundle(text, subpage_texts)
+        if subpage_texts:
+            pages_scraped = "homepage;" + ";".join(subpage_texts.keys())
+    else:
+        scraped_text = build_scraped_text_bundle(text, {})
 
     return {
         "industry_match": match_result,
@@ -610,6 +704,8 @@ def process_layer2_row(row, api_key, config):
         "homepage_snippet": (text or "")[:300],
         "resolved_name": resolved_name if resolved_name else raw_name,
         "name_source": name_source,
+        "scraped_text": scraped_text,
+        "pages_scraped": pages_scraped,
     }
 
 
@@ -641,6 +737,8 @@ def run_layer2(rows, api_key, config):
                 row["industry_match"] = "error"
                 row["matched_keywords"] = ""
                 row["homepage_snippet"] = str(e)[:200]
+                row.setdefault("scraped_text", "")
+                row.setdefault("pages_scraped", "")
 
     # Set non-live rows
     for row in rows:
@@ -651,6 +749,8 @@ def run_layer2(rows, api_key, config):
             row.setdefault("negative_keywords", "")
             row.setdefault("resolved_name", row.get("company_name", "") or row.get("Company Name", ""))
             row.setdefault("name_source", "domain_dead")
+            row.setdefault("scraped_text", "")
+            row.setdefault("pages_scraped", "")
 
     # Stats
     match_counts = defaultdict(int)
@@ -707,12 +807,13 @@ def write_output(rows, output_path):
         row["filter_decision"] = decision
         row["filter_reason"] = reason
 
-    # Output columns (preserve original + add filter columns)
+    # Output columns (preserve original + add filter columns; scraped_text = raw text for AI/Clay)
     filter_col_names = (
         "domain_status", "http_code", "redirect_url", "is_parked",
         "error", "industry_match", "matched_keywords",
         "negative_keywords", "homepage_snippet",
         "resolved_name", "name_source",
+        "pages_scraped", "scraped_text",
         "filter_decision", "filter_reason"
     )
     original_cols = [c for c in rows[0].keys()
@@ -721,6 +822,7 @@ def write_output(rows, output_path):
     filter_cols = ["domain_status", "http_code", "redirect_url",
                    "industry_match", "matched_keywords", "negative_keywords",
                    "resolved_name", "name_source",
+                   "pages_scraped", "scraped_text",
                    "homepage_snippet", "filter_decision", "filter_reason"]
 
     all_cols = original_cols + filter_cols
@@ -826,6 +928,8 @@ def main():
             row.setdefault("homepage_snippet", "")
             row.setdefault("resolved_name", row.get("company_name", "") or row.get("Company Name", ""))
             row.setdefault("name_source", "not_run")
+            row.setdefault("scraped_text", "")
+            row.setdefault("pages_scraped", "")
 
     # Write output
     write_output(rows, args.output)
