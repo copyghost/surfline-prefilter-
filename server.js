@@ -28,6 +28,7 @@ const upload = multer({
 }).single("csv");
 
 let lastSummary = null;
+const jobState = { running: false, completedAt: null, error: null, summary: null };
 
 function parseKeywords(s) {
   if (!s || typeof s !== "string") return [];
@@ -57,7 +58,7 @@ function runPipeline(opts) {
   const cmd = `python3 "${SCRIPT_PATH}" --input "${inputPath}" --output "${OUTPUT_CSV}" ${configArg}`.trim();
   const env = { ...process.env };
   if (apiKey) env.ZENROWS_API_KEY = apiKey;
-  return execAsync(cmd, { cwd: PROJECT_ROOT, maxBuffer: 10 * 1024 * 1024, env });
+  return execAsync(cmd, { cwd: PROJECT_ROOT, maxBuffer: 100 * 1024 * 1024, env });
 }
 
 function getSummaryFromCsv(outputPath) {
@@ -132,6 +133,14 @@ const formHtml = `
     const form = document.getElementById('form');
     const runBtn = document.getElementById('runBtn');
     const resultEl = document.getElementById('result');
+    function checkStatusFn() {
+      fetch('/status').then(function(r){ return r.json(); }).then(function(s){
+        var el = document.getElementById('result');
+        if (s.running) { el.innerHTML = 'Still running… (large files can take 20+ min)'; return; }
+        if (s.error) { el.className = 'error'; el.innerHTML = '<div class="summary">Pipeline failed</div>' + escapeHtml(s.error); return; }
+        if (s.summary) { var t=s.summary; el.className = 'success'; el.innerHTML = '<div class="summary">Done: '+t.pass+' pass, '+t.fail+' fail, '+t.review+' review ('+t.total+' total)</div><a href="/output">Download filtered_output.csv</a>'; }
+      });
+    }
     form.onsubmit = async function(e) {
       e.preventDefault();
       runBtn.disabled = true;
@@ -152,7 +161,36 @@ const formHtml = `
           runBtn.disabled = false;
           return;
         }
-        if (data.ok) {
+        if (data.started) {
+          resultEl.className = 'success';
+          resultEl.innerHTML = '<div class="summary">Pipeline started</div><p>' + escapeHtml(data.message || '') + '</p>' +
+            '<button type="button" id="statusBtn">Check status</button> <a href="/output" style="display:none" id="downloadLink">Download CSV</a>';
+          const statusBtn = document.getElementById('statusBtn');
+          const downloadLink = document.getElementById('downloadLink');
+          let pollId;
+          function checkStatus() {
+            fetch('/status').then(r => r.json()).then(st => {
+              if (st.running) {
+                resultEl.querySelector('p').textContent = 'Running… (large files can take 20+ min)';
+                return;
+              }
+              clearInterval(pollId);
+              statusBtn.style.display = 'none';
+              if (st.error) {
+                resultEl.className = 'error';
+                resultEl.innerHTML = '<div class="summary">Pipeline failed</div>' + escapeHtml(st.error);
+              } else if (st.summary) {
+                const s = st.summary;
+                resultEl.className = 'success';
+                resultEl.innerHTML = '<div class="summary">Done: ' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.review + ' review (' + s.total + ' total)</div>' +
+                  '<a href="/output">Download filtered_output.csv</a>';
+              }
+            }).catch(() => {});
+          }
+          statusBtn.onclick = checkStatus;
+          pollId = setInterval(checkStatus, 12000);
+          checkStatus();
+        } else if (data.ok) {
           const s = data.summary;
           resultEl.className = 'success';
           resultEl.innerHTML = '<div class="summary">' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.review + ' review (' + s.total + ' total)</div>' +
@@ -161,7 +199,9 @@ const formHtml = `
         } else {
           resultEl.className = 'error';
           resultEl.innerHTML = '<div class="summary">Error</div>' + escapeHtml(data.error || 'Unknown error') +
-            (data.logTail ? '<pre id="log">' + escapeHtml(data.logTail.slice(-800)) + '</pre>' : '');
+            (data.logTail ? '<pre id="log">' + escapeHtml(data.logTail.slice(-800)) + '</pre>' : '') +
+            (r.status === 429 ? ' <button type="button" id="checkStatus429">Check status</button>' : '');
+          if (r.status === 429) setTimeout(function(){ var b = document.getElementById("checkStatus429"); if (b) b.onclick = checkStatusFn; }, 0);
         }
       } catch (err) {
         resultEl.className = 'error';
@@ -211,27 +251,37 @@ app.post("/run", (req, res, next) => {
   const configToUse = hasKeywords ? runConfigPath : (fs.existsSync(DEFAULT_CONFIG) ? DEFAULT_CONFIG : null);
   const apiKey = (req.body.apiKey || "").trim();
 
-  try {
-    const { stdout, stderr } = await runPipeline({
-      inputPath,
-      configPath: configToUse,
-      apiKey,
-    });
-    const summary = getSummaryFromCsv(OUTPUT_CSV);
-    lastSummary = summary;
-    res.json({
-      ok: true,
-      summary: summary || { total: 0, pass: 0, fail: 0, review: 0 },
-      logTail: (stdout + "\n" + stderr).slice(-1500),
-    });
-  } catch (err) {
-    lastSummary = null;
-    res.status(500).json({
-      ok: false,
-      error: err.message || String(err),
-      logTail: (err.stdout || "") + (err.stderr || "").slice(-1500),
-    });
+  if (jobState.running) {
+    return res.status(429).json({ ok: false, error: "A pipeline is already running. Wait for it to finish or check /status." });
   }
+
+  res.status(202).json({
+    ok: true,
+    started: true,
+    message: "Pipeline started in the background. For large files (e.g. 20k rows) this may take 20+ minutes. Use Check status below.",
+    job_id: "default",
+  });
+
+  setImmediate(() => {
+    jobState.running = true;
+    jobState.error = null;
+    jobState.summary = null;
+    jobState.completedAt = null;
+    runPipeline({ inputPath, configPath: configToUse, apiKey })
+      .then(({ stdout, stderr }) => {
+        const summary = getSummaryFromCsv(OUTPUT_CSV);
+        lastSummary = summary;
+        jobState.summary = summary || { total: 0, pass: 0, fail: 0, review: 0 };
+        jobState.running = false;
+        jobState.completedAt = new Date().toISOString();
+      })
+      .catch((err) => {
+        lastSummary = null;
+        jobState.running = false;
+        jobState.error = err.message || String(err);
+        jobState.completedAt = new Date().toISOString();
+      });
+  });
 });
 
 // Backward compat: GET /run still works (uses defaults)
@@ -259,6 +309,15 @@ app.get("/run", async (req, res) => {
       logTail: (err.stdout || "") + (err.stderr || "").slice(-1500),
     });
   }
+});
+
+app.get("/status", (req, res) => {
+  res.json({
+    running: jobState.running,
+    completed_at: jobState.completedAt,
+    error: jobState.error,
+    summary: jobState.summary,
+  });
 });
 
 app.get("/output", (req, res) => {
