@@ -140,7 +140,18 @@ const formHtml = `
       const fd = new FormData(form);
       try {
         const r = await fetch('/run', { method: 'POST', body: fd });
-        const data = await r.json();
+        const text = await r.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (_) {
+          resultEl.className = 'error';
+          resultEl.innerHTML = '<div class="summary">Server returned an error page</div>' +
+            'The pipeline may have timed out or the server crashed. Status: ' + r.status + '.' +
+            (text.slice(0, 200).includes('<') ? ' Try again or check Railway logs.' : ' Response: ' + escapeHtml(text.slice(0, 500)));
+          runBtn.disabled = false;
+          return;
+        }
         if (data.ok) {
           const s = data.summary;
           resultEl.className = 'success';
