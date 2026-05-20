@@ -1,6 +1,9 @@
 /**
- * Pre-filter Pipeline API: form for ZenRows API key, CSV upload, and keywords.
- * POST /run runs the pipeline with the provided options.
+ * Pre-filter Pipeline API with chunked processing for Vercel serverless.
+ * Splits large CSVs into CHUNK_SIZE-row pieces so each invocation finishes
+ * within the serverless execution timeout.  The client drives the loop,
+ * calling POST /run (upload + chunk 0) then POST /run/next for each
+ * subsequent chunk.
  */
 const express = require("express");
 const multer = require("multer");
@@ -14,9 +17,17 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const PROJECT_ROOT = path.resolve(__dirname);
-const UPLOAD_DIR = path.join(PROJECT_ROOT, "uploads");
+const TMP_DIR = "/tmp";
+const UPLOAD_DIR = path.join(TMP_DIR, "uploads");
+const CHUNK_SIZE = parseInt(process.env.CHUNK_SIZE || "50", 10);
+
+const FULL_INPUT_PATH = path.join(TMP_DIR, "full_input.csv");
+const CHUNK_INPUT_PATH = path.join(TMP_DIR, "chunk_input.csv");
+const CHUNK_OUTPUT_PATH = path.join(TMP_DIR, "chunk_output.csv");
+const CHUNK_STATE_PATH = path.join(TMP_DIR, "chunk_state.json");
+const OUTPUT_CSV = process.env.OUTPUT_CSV || path.join(TMP_DIR, "filtered_output.csv");
+
 const DEFAULT_INPUT = path.join(PROJECT_ROOT, "raw_tam.csv");
-const OUTPUT_CSV = process.env.OUTPUT_CSV || path.join(PROJECT_ROOT, "filtered_output.csv");
 const DEFAULT_CONFIG = path.join(PROJECT_ROOT, "config.yaml");
 const SCRIPT_PATH = path.join(PROJECT_ROOT, "pre_filter.py");
 
@@ -27,15 +38,11 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
 }).single("csv");
 
-let lastSummary = null;
-const jobState = { running: false, completedAt: null, error: null, summary: null };
+/* ── helpers ─────────────────────────────────────────────── */
 
 function parseKeywords(s) {
   if (!s || typeof s !== "string") return [];
-  return s
-    .split(/[\n,]+/)
-    .map((k) => k.trim().toLowerCase())
-    .filter(Boolean);
+  return s.split(/[\n,]+/).map((k) => k.trim().toLowerCase()).filter(Boolean);
 }
 
 function buildConfigYaml(primary, secondary, negative) {
@@ -51,19 +58,20 @@ function buildConfigYaml(primary, secondary, negative) {
 
 function runPipeline(opts) {
   const inputPath = opts.inputPath || DEFAULT_INPUT;
+  const outputPath = opts.outputPath || OUTPUT_CSV;
   const configPath = opts.configPath || DEFAULT_CONFIG;
   const apiKey = (opts.apiKey || "").trim();
-  const useConfig = fs.existsSync(configPath);
+  const useConfig = configPath && fs.existsSync(configPath);
   const configArg = useConfig ? `--config "${configPath}"` : "--layer1-only";
-  const cmd = `python3 "${SCRIPT_PATH}" --input "${inputPath}" --output "${OUTPUT_CSV}" ${configArg}`.trim();
+  const cmd = `python3 "${SCRIPT_PATH}" --input "${inputPath}" --output "${outputPath}" ${configArg}`.trim();
   const env = { ...process.env };
   if (apiKey) env.ZENROWS_API_KEY = apiKey;
   return execAsync(cmd, { cwd: PROJECT_ROOT, maxBuffer: 100 * 1024 * 1024, env });
 }
 
-function getSummaryFromCsv(outputPath) {
-  if (!fs.existsSync(outputPath)) return null;
-  const content = fs.readFileSync(outputPath, "utf-8");
+function getSummaryFromCsv(csvPath) {
+  if (!fs.existsSync(csvPath)) return null;
+  const content = fs.readFileSync(csvPath, "utf-8");
   const lines = content.trim().split("\n");
   if (lines.length < 2) return { total: 0, pass: 0, fail: 0, review: 0 };
   let pass = 0, fail = 0, review = 0;
@@ -75,6 +83,57 @@ function getSummaryFromCsv(outputPath) {
   }
   return { total: lines.length - 1, pass, fail, review };
 }
+
+function getChunkState() {
+  if (!fs.existsSync(CHUNK_STATE_PATH)) return null;
+  try { return JSON.parse(fs.readFileSync(CHUNK_STATE_PATH, "utf-8")); } catch { return null; }
+}
+
+function saveChunkState(state) {
+  fs.writeFileSync(CHUNK_STATE_PATH, JSON.stringify(state), "utf-8");
+}
+
+function countInputRows() {
+  const content = fs.readFileSync(FULL_INPUT_PATH, "utf-8");
+  return content.trim().split("\n").length - 1;
+}
+
+function extractChunkCsv(chunkIndex) {
+  const content = fs.readFileSync(FULL_INPUT_PATH, "utf-8");
+  const lines = content.trim().split("\n");
+  const header = lines[0];
+  const dataLines = lines.slice(1);
+  const start = chunkIndex * CHUNK_SIZE;
+  const end = Math.min(start + CHUNK_SIZE, dataLines.length);
+  return header + "\n" + dataLines.slice(start, end).join("\n") + "\n";
+}
+
+function mergeChunkOutput(chunkIndex) {
+  if (!fs.existsSync(CHUNK_OUTPUT_PATH)) return;
+  const output = fs.readFileSync(CHUNK_OUTPUT_PATH, "utf-8").trim();
+  if (!output) return;
+  const lines = output.split("\n");
+  if (chunkIndex === 0) {
+    fs.writeFileSync(OUTPUT_CSV, output + "\n", "utf-8");
+  } else if (lines.length > 1) {
+    fs.appendFileSync(OUTPUT_CSV, lines.slice(1).join("\n") + "\n", "utf-8");
+  }
+}
+
+async function processChunk(chunkIndex, opts) {
+  const chunkCsv = extractChunkCsv(chunkIndex);
+  fs.writeFileSync(CHUNK_INPUT_PATH, chunkCsv, "utf-8");
+  await runPipeline({
+    inputPath: CHUNK_INPUT_PATH,
+    outputPath: CHUNK_OUTPUT_PATH,
+    configPath: opts.configPath,
+    apiKey: opts.apiKey,
+  });
+  mergeChunkOutput(chunkIndex);
+  return getSummaryFromCsv(OUTPUT_CSV);
+}
+
+/* ── HTML form ───────────────────────────────────────────── */
 
 const formHtml = `
 <!DOCTYPE html>
@@ -103,7 +162,9 @@ const formHtml = `
     #result.error { background: #f8d7da; }
     #result .summary { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; }
     #result a { color: #0d6efd; }
-    #log { font-size: 0.8rem; margin-top: 0.5rem; white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
+    .progress-bar { width: 100%; height: 18px; background: #e9ecef; border-radius: 9px; overflow: hidden; margin-top: 0.5rem; }
+    .progress-fill { height: 100%; background: #0d6efd; border-radius: 9px; transition: width 0.3s ease; }
+    .chunk-info { font-size: 0.85rem; color: #555; margin-top: 0.35rem; }
   </style>
 </head>
 <body>
@@ -130,82 +191,68 @@ const formHtml = `
 
   <script>
     function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-    const form = document.getElementById('form');
-    const runBtn = document.getElementById('runBtn');
-    const resultEl = document.getElementById('result');
-    function checkStatusFn() {
-      fetch('/status').then(function(r){ return r.json(); }).then(function(s){
-        var el = document.getElementById('result');
-        if (s.running) { el.innerHTML = 'Still running… (large files can take 20+ min)'; return; }
-        if (s.error) { el.className = 'error'; el.innerHTML = '<div class="summary">Pipeline failed</div>' + escapeHtml(s.error); return; }
-        if (s.summary) { var t=s.summary; el.className = 'success'; el.innerHTML = '<div class="summary">Done: '+t.pass+' pass, '+t.fail+' fail, '+t.review+' review ('+t.total+' total)</div><a href="/output">Download filtered_output.csv</a>'; }
-      });
+    var form = document.getElementById('form');
+    var runBtn = document.getElementById('runBtn');
+    var resultEl = document.getElementById('result');
+
+    function showProgress(chunk, totalChunks, summary) {
+      var pct = Math.round(((chunk + 1) / totalChunks) * 100);
+      var parts = '<div class="summary">Processing chunk ' + (chunk + 1) + ' of ' + totalChunks + '</div>';
+      parts += '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div>';
+      if (summary) {
+        parts += '<div class="chunk-info">' + summary.total + ' rows processed so far — ' +
+          summary.pass + ' pass, ' + summary.fail + ' fail, ' + summary.review + ' review</div>';
+      }
+      resultEl.className = '';
+      resultEl.innerHTML = parts;
     }
+
+    function showDone(summary) {
+      resultEl.className = 'success';
+      resultEl.innerHTML = '<div class="summary">Done: ' + summary.pass + ' pass, ' +
+        summary.fail + ' fail, ' + summary.review + ' review (' + summary.total + ' total)</div>' +
+        '<a href="/output">Download filtered_output.csv</a>';
+    }
+
+    function showError(msg, chunk) {
+      resultEl.className = 'error';
+      var prefix = typeof chunk === 'number' ? 'Error on chunk ' + (chunk + 1) : 'Error';
+      resultEl.innerHTML = '<div class="summary">' + prefix + '</div>' + escapeHtml(msg);
+    }
+
     form.onsubmit = async function(e) {
       e.preventDefault();
       runBtn.disabled = true;
-      resultEl.innerHTML = 'Running…';
       resultEl.className = '';
-      const fd = new FormData(form);
+      resultEl.innerHTML = 'Uploading and starting…';
+
+      var fd = new FormData(form);
       try {
-        const r = await fetch('/run', { method: 'POST', body: fd });
-        const text = await r.text();
-        let data;
-        try {
-          data = JSON.parse(text);
-        } catch (_) {
-          resultEl.className = 'error';
-          resultEl.innerHTML = '<div class="summary">Server returned an error page</div>' +
-            'The pipeline may have timed out or the server crashed. Status: ' + r.status + '.' +
-            (text.slice(0, 200).includes('<') ? ' Try again or check Railway logs.' : ' Response: ' + escapeHtml(text.slice(0, 500)));
+        var r = await fetch('/run', { method: 'POST', body: fd });
+        var data;
+        try { data = await r.json(); } catch(_) {
+          showError('Server returned non-JSON (status ' + r.status + '). Check Vercel logs.');
           runBtn.disabled = false;
           return;
         }
-        if (data.started) {
-          resultEl.className = 'success';
-          resultEl.innerHTML = '<div class="summary">Pipeline started</div><p>' + escapeHtml(data.message || '') + '</p>' +
-            '<button type="button" id="statusBtn">Check status</button> <a href="/output" style="display:none" id="downloadLink">Download CSV</a>';
-          const statusBtn = document.getElementById('statusBtn');
-          const downloadLink = document.getElementById('downloadLink');
-          let pollId;
-          function checkStatus() {
-            fetch('/status').then(r => r.json()).then(st => {
-              if (st.running) {
-                resultEl.querySelector('p').textContent = 'Running… (large files can take 20+ min)';
-                return;
-              }
-              clearInterval(pollId);
-              statusBtn.style.display = 'none';
-              if (st.error) {
-                resultEl.className = 'error';
-                resultEl.innerHTML = '<div class="summary">Pipeline failed</div>' + escapeHtml(st.error);
-              } else if (st.summary) {
-                const s = st.summary;
-                resultEl.className = 'success';
-                resultEl.innerHTML = '<div class="summary">Done: ' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.review + ' review (' + s.total + ' total)</div>' +
-                  '<a href="/output">Download filtered_output.csv</a>';
-              }
-            }).catch(() => {});
+        if (!data.ok) { showError(data.error || 'Unknown error', data.chunk); runBtn.disabled = false; return; }
+
+        showProgress(data.chunk, data.totalChunks, data.summary);
+
+        while (!data.done) {
+          r = await fetch('/run/next', { method: 'POST' });
+          try { data = await r.json(); } catch(_) {
+            showError('Server returned non-JSON during chunk processing (status ' + r.status + ').');
+            runBtn.disabled = false;
+            return;
           }
-          statusBtn.onclick = checkStatus;
-          pollId = setInterval(checkStatus, 12000);
-          checkStatus();
-        } else if (data.ok) {
-          const s = data.summary;
-          resultEl.className = 'success';
-          resultEl.innerHTML = '<div class="summary">' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.review + ' review (' + s.total + ' total)</div>' +
-            '<a href="/output">Download filtered_output.csv</a>' +
-            (data.logTail ? '<pre id="log">' + escapeHtml(data.logTail.slice(-800)) + '</pre>' : '');
-        } else {
-          resultEl.className = 'error';
-          resultEl.innerHTML = '<div class="summary">Error</div>' + escapeHtml(data.error || 'Unknown error') +
-            (data.logTail ? '<pre id="log">' + escapeHtml(data.logTail.slice(-800)) + '</pre>' : '') +
-            (r.status === 429 ? ' <button type="button" id="checkStatus429">Check status</button>' : '');
-          if (r.status === 429) setTimeout(function(){ var b = document.getElementById("checkStatus429"); if (b) b.onclick = checkStatusFn; }, 0);
+          if (!data.ok) { showError(data.error || 'Unknown error', data.chunk); runBtn.disabled = false; return; }
+          showProgress(data.chunk, data.totalChunks, data.summary);
         }
+
+        showDone(data.summary || { total: 0, pass: 0, fail: 0, review: 0 });
       } catch (err) {
-        resultEl.className = 'error';
-        resultEl.innerHTML = '<div class="summary">Error</div>' + escapeHtml(err.message);
+        showError(err.message);
       }
       runBtn.disabled = false;
     };
@@ -213,6 +260,8 @@ const formHtml = `
 </body>
 </html>
 `;
+
+/* ── routes ──────────────────────────────────────────────── */
 
 app.get("/", (req, res) => {
   res.type("text/html").send(formHtml);
@@ -228,13 +277,12 @@ app.post("/run", (req, res, next) => {
     return res.status(500).json({ ok: false, error: "pre_filter.py not found" });
   }
 
-  let inputPath = DEFAULT_INPUT;
   if (req.file && req.file.path) {
-    const dest = path.join(UPLOAD_DIR, "input.csv");
-    fs.renameSync(req.file.path, dest);
-    inputPath = dest;
-  }
-  if (!fs.existsSync(inputPath)) {
+    fs.copyFileSync(req.file.path, FULL_INPUT_PATH);
+    try { fs.unlinkSync(req.file.path); } catch {}
+  } else if (fs.existsSync(DEFAULT_INPUT)) {
+    fs.copyFileSync(DEFAULT_INPUT, FULL_INPUT_PATH);
+  } else {
     return res.status(400).json({ ok: false, error: "No input CSV. Upload a file or add raw_tam.csv to the server." });
   }
 
@@ -245,46 +293,76 @@ app.post("/run", (req, res, next) => {
   const runConfigPath = path.join(UPLOAD_DIR, "config_run.yaml");
   if (hasKeywords) {
     fs.writeFileSync(runConfigPath, buildConfigYaml(primary, secondary, negative), "utf-8");
-  } else if (fs.existsSync(runConfigPath)) {
-    try { fs.unlinkSync(runConfigPath); } catch (_) {}
   }
-  const configToUse = hasKeywords ? runConfigPath : (fs.existsSync(DEFAULT_CONFIG) ? DEFAULT_CONFIG : null);
+  const configPath = hasKeywords ? runConfigPath : (fs.existsSync(DEFAULT_CONFIG) ? DEFAULT_CONFIG : null);
   const apiKey = (req.body.apiKey || "").trim();
 
-  if (jobState.running) {
-    return res.status(429).json({ ok: false, error: "A pipeline is already running. Wait for it to finish or check /status." });
+  const totalRows = countInputRows();
+  const totalChunks = Math.ceil(totalRows / CHUNK_SIZE);
+
+  if (fs.existsSync(OUTPUT_CSV)) fs.unlinkSync(OUTPUT_CSV);
+
+  const state = { currentChunk: 0, totalChunks, totalRows, apiKey, configPath };
+  saveChunkState(state);
+
+  try {
+    const summary = await processChunk(0, { configPath, apiKey });
+    state.currentChunk = 1;
+    saveChunkState(state);
+    res.json({
+      ok: true,
+      chunk: 0,
+      totalChunks,
+      totalRows,
+      done: totalChunks <= 1,
+      summary: summary || { total: 0, pass: 0, fail: 0, review: 0 },
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      chunk: 0,
+      totalChunks,
+      error: err.message || String(err),
+    });
   }
-
-  res.status(202).json({
-    ok: true,
-    started: true,
-    message: "Pipeline started in the background. For large files (e.g. 20k rows) this may take 20+ minutes. Use Check status below.",
-    job_id: "default",
-  });
-
-  setImmediate(() => {
-    jobState.running = true;
-    jobState.error = null;
-    jobState.summary = null;
-    jobState.completedAt = null;
-    runPipeline({ inputPath, configPath: configToUse, apiKey })
-      .then(({ stdout, stderr }) => {
-        const summary = getSummaryFromCsv(OUTPUT_CSV);
-        lastSummary = summary;
-        jobState.summary = summary || { total: 0, pass: 0, fail: 0, review: 0 };
-        jobState.running = false;
-        jobState.completedAt = new Date().toISOString();
-      })
-      .catch((err) => {
-        lastSummary = null;
-        jobState.running = false;
-        jobState.error = err.message || String(err);
-        jobState.completedAt = new Date().toISOString();
-      });
-  });
 });
 
-// Backward compat: GET /run still works (uses defaults)
+app.post("/run/next", async (req, res) => {
+  const state = getChunkState();
+  if (!state) {
+    return res.status(400).json({ ok: false, error: "No active job. Upload a CSV via the form first." });
+  }
+  if (!fs.existsSync(FULL_INPUT_PATH)) {
+    return res.status(400).json({ ok: false, error: "Input file missing (server cold-started). Please re-upload your CSV." });
+  }
+  if (state.currentChunk >= state.totalChunks) {
+    const summary = getSummaryFromCsv(OUTPUT_CSV);
+    return res.json({ ok: true, chunk: state.currentChunk - 1, totalChunks: state.totalChunks, done: true, summary });
+  }
+
+  const chunkIndex = state.currentChunk;
+  try {
+    const summary = await processChunk(chunkIndex, { configPath: state.configPath, apiKey: state.apiKey });
+    state.currentChunk = chunkIndex + 1;
+    saveChunkState(state);
+    res.json({
+      ok: true,
+      chunk: chunkIndex,
+      totalChunks: state.totalChunks,
+      totalRows: state.totalRows,
+      done: state.currentChunk >= state.totalChunks,
+      summary: summary || { total: 0, pass: 0, fail: 0, review: 0 },
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      chunk: chunkIndex,
+      totalChunks: state.totalChunks,
+      error: err.message || String(err),
+    });
+  }
+});
+
 app.get("/run", async (req, res) => {
   if (!fs.existsSync(SCRIPT_PATH)) {
     return res.status(500).json({ ok: false, error: "pre_filter.py not found" });
@@ -293,16 +371,14 @@ app.get("/run", async (req, res) => {
     return res.status(400).json({ ok: false, error: "No input CSV. Upload one via the form or add raw_tam.csv." });
   }
   try {
-    const { stdout, stderr } = await runPipeline({});
+    const { stdout, stderr } = await runPipeline({ outputPath: OUTPUT_CSV });
     const summary = getSummaryFromCsv(OUTPUT_CSV);
-    lastSummary = summary;
     res.json({
       ok: true,
       summary: summary || { total: 0, pass: 0, fail: 0, review: 0 },
       logTail: (stdout + "\n" + stderr).slice(-1500),
     });
   } catch (err) {
-    lastSummary = null;
     res.status(500).json({
       ok: false,
       error: err.message || String(err),
@@ -312,11 +388,15 @@ app.get("/run", async (req, res) => {
 });
 
 app.get("/status", (req, res) => {
+  const state = getChunkState();
+  if (!state) return res.json({ running: false, chunk: 0, totalChunks: 0, done: false, summary: null });
+  const done = state.currentChunk >= state.totalChunks;
   res.json({
-    running: jobState.running,
-    completed_at: jobState.completedAt,
-    error: jobState.error,
-    summary: jobState.summary,
+    running: false,
+    chunk: state.currentChunk,
+    totalChunks: state.totalChunks,
+    done,
+    summary: done ? getSummaryFromCsv(OUTPUT_CSV) : null,
   });
 });
 
@@ -328,5 +408,5 @@ app.get("/output", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Pipeline: http://localhost:${PORT}`);
+  console.log(`Pipeline: http://localhost:${PORT} (chunk size: ${CHUNK_SIZE} rows)`);
 });
