@@ -8,7 +8,8 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 
-COPY requirements.txt pre_filter.py config.yaml server.js ./
+COPY requirements.txt pre_filter.py config.yaml server.js start.js ./
+COPY lib ./lib
 # Include input CSV in the image (or override INPUT_CSV at runtime)
 COPY raw_tam.csv ./
 
