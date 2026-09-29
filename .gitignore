@@ -1,21 +1,12 @@
-# Dependencies
+.next/
 node_modules/
-
-# Env and secrets
-.env
-.env.*
-!.env.example
-
-# Build and logs
+out/
 dist/
+build/
+.env*
+!.env.example
+.vercel/
+outputs/
+work/
 *.log
-npm-debug.log*
-
-# IDE and OS
-.cursor/
 .DS_Store
-*.swp
-*.swo
-
-# Pipeline outputs and uploads
-uploads/
