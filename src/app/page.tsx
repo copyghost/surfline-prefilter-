@@ -254,6 +254,9 @@ export default function Home() {
             <label className="block text-sm font-semibold" htmlFor="include-keywords">
               Include keywords
             </label>
+            <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+              Similar words match, so pumping matches pumps and sepic matches septic. Use * or % as a wildcard, such as pump*.
+            </p>
             <textarea
               id="include-keywords"
               value={includeKeywords}
@@ -268,6 +271,9 @@ export default function Home() {
             <label className="block text-sm font-semibold" htmlFor="exclude-keywords">
               Exclude keywords
             </label>
+            <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+              Same similar-word and wildcard rules. Any match disqualifies the domain.
+            </p>
             <textarea
               id="exclude-keywords"
               value={excludeKeywords}

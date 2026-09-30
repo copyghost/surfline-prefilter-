@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { findKeywordMatches } from "../../../lib/keyword-match";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -397,10 +398,6 @@ function normalizeRenderMode(value: unknown): RenderMode {
 
 function normalizeEndpoint(value: string) {
   return value.replace(/\/+$/, "");
-}
-
-function findKeywordMatches(text: string, keywords: string[]) {
-  return keywords.filter((keyword) => text.includes(keyword));
 }
 
 function detectBlock(text: string, status: number | string, textLength = 0) {
