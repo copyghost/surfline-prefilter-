@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { findKeywordMatches } from "../../../lib/keyword-match";
+import { findChromeExecutable, renderWithLocalChrome } from "../../../lib/local-chrome";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -89,7 +90,7 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({
     results,
     meta: {
-      jsRenderingConfigured: hasBrowserlessConfig(),
+      jsRenderingConfigured: hasJsRenderConfig(),
       renderMode,
     },
   });
@@ -136,7 +137,7 @@ async function analyzeDomain(
       resolvedUrl: page.url,
       renderMode: page.renderMode,
       renderAttempted: renderMode !== "html",
-      jsRenderConfigured: hasBrowserlessConfig(),
+      jsRenderConfigured: hasJsRenderConfig(),
       jsRenderUsed: page.renderMode === "js",
       textLength: extracted.text.length,
       pageTitle: extracted.title,
@@ -177,7 +178,7 @@ function emptyResult(
     resolvedUrl: "",
     renderMode: "none",
     renderAttempted: requestedRenderMode !== "html",
-    jsRenderConfigured: hasBrowserlessConfig(),
+    jsRenderConfigured: hasJsRenderConfig(),
     jsRenderUsed: false,
     textLength: 0,
     pageTitle: "",
@@ -290,14 +291,20 @@ async function fetchHomePage(domain: string): Promise<PageFetch> {
 }
 
 async function renderHomePage(domain: string, knownUrl?: string): Promise<PageFetch> {
+  const targetUrl = knownUrl ?? `https://${domain}`;
   const token = process.env.BROWSERLESS_TOKEN;
-  const endpoint = normalizeEndpoint(process.env.BROWSERLESS_ENDPOINT ?? "https://chrome.browserless.io");
 
   if (!token) {
-    throw new Error("JS rendering is not configured. Add BROWSERLESS_TOKEN in Vercel.");
+    const html = await renderWithLocalChrome(targetUrl, RENDER_TIMEOUT_MS);
+    return {
+      status: 200,
+      url: targetUrl,
+      html: html.slice(0, MAX_HTML_CHARS),
+      renderMode: "js",
+    };
   }
 
-  const targetUrl = knownUrl ?? `https://${domain}`;
+  const endpoint = normalizeEndpoint(process.env.BROWSERLESS_ENDPOINT ?? "https://chrome.browserless.io");
   const apiUrl = `${endpoint}/content?token=${encodeURIComponent(token)}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
@@ -443,8 +450,8 @@ function readablePattern(pattern: RegExp) {
   return pattern.source.replace(/\\/g, "").replace(/\|/g, " or ");
 }
 
-function hasBrowserlessConfig() {
-  return Boolean(process.env.BROWSERLESS_TOKEN);
+function hasJsRenderConfig() {
+  return Boolean(process.env.BROWSERLESS_TOKEN) || Boolean(findChromeExecutable());
 }
 
 function isTextLikeContent(contentType: string) {

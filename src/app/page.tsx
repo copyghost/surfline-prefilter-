@@ -144,7 +144,7 @@ export default function Home() {
       }
 
       if (renderMode !== "html" && sawRenderMeta && !jsRenderingConfigured) {
-        setNotice("JS rendering is ready in the app, but it needs BROWSERLESS_TOKEN configured on Vercel.");
+        setNotice("JS rendering needs Chrome or Chromium installed on the computer running this server.");
       } else if (batchFailures > 0) {
         setNotice(`${batchFailures} batch${batchFailures === 1 ? "" : "es"} failed and were marked for review.`);
       } else {
@@ -238,6 +238,9 @@ export default function Home() {
             <label className="block text-sm font-semibold" htmlFor="render-mode">
               Rendering
             </label>
+            <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+              JavaScript rendering uses Chrome installed on this computer. No Browserless account is required.
+            </p>
             <select
               id="render-mode"
               value={renderMode}
