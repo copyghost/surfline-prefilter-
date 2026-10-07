@@ -74,7 +74,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const rows = Array.isArray(body.rows) ? body.rows.slice(0, MAX_BATCH_ROWS) : [];
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  if (rows.length > MAX_BATCH_ROWS) {
+    return NextResponse.json(
+      { error: `Send at most ${MAX_BATCH_ROWS} rows per request.` },
+      { status: 400 },
+    );
+  }
   const includeKeywords = normalizeKeywords(body.includeKeywords);
   const excludeKeywords = normalizeKeywords(body.excludeKeywords);
   const renderMode = normalizeRenderMode(body.renderMode);
@@ -83,7 +89,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Add at least one row with a domain." }, { status: 400 });
   }
 
-  const results = await mapWithConcurrency(rows, ANALYSIS_CONCURRENCY, (row, index) =>
+  const concurrency = renderMode === "html" ? ANALYSIS_CONCURRENCY : 2;
+  const results = await mapWithConcurrency(rows, concurrency, (row, index) =>
     analyzeDomain(row, index, includeKeywords, excludeKeywords, renderMode),
   );
 
@@ -92,6 +99,7 @@ export async function POST(request: NextRequest) {
     meta: {
       jsRenderingConfigured: hasJsRenderConfig(),
       renderMode,
+      processed: results.length,
     },
   });
 }

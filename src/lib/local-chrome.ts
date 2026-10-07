@@ -48,19 +48,41 @@ export async function closeLocalChrome() {
   await browser?.close().catch(() => undefined);
 }
 
-async function launchChrome(executablePath: string) {
+function launchChrome(executablePath: string): Promise<Browser> {
   if (!browserPromise) {
-    browserPromise = puppeteer
-      .launch({
-        executablePath,
-        headless: true,
-        args: ["--no-sandbox", "--disable-dev-shm-usage"],
-      })
-      .catch((error) => {
-        browserPromise = null;
-        throw error;
-      });
+    browserPromise = startBrowser(executablePath);
   }
 
-  return browserPromise;
+  return browserPromise.then(
+    (browser) => {
+      if (browser.connected) return browser;
+      browserPromise = startBrowser(executablePath);
+      return browserPromise;
+    },
+    () => {
+      browserPromise = startBrowser(executablePath);
+      return browserPromise;
+    },
+  );
+}
+
+function startBrowser(executablePath: string) {
+  const launched = puppeteer
+    .launch({
+      executablePath,
+      headless: true,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    })
+    .then((browser) => {
+      browser.once("disconnected", () => {
+        if (browserPromise === launched) browserPromise = null;
+      });
+      return browser;
+    });
+
+  browserPromise = launched;
+  launched.catch(() => {
+    if (browserPromise === launched) browserPromise = null;
+  });
+  return launched;
 }

@@ -27,7 +27,7 @@ Rendering modes:
 - `HTML only`: fastest, and does not open Chrome
 - `JS render first`: opens each homepage in local Chrome
 
-Large uploads are processed in batches of 25 domains per API request. A 25k-row CSV can be uploaded at once, but the browser tab must stay open until processing finishes. For very large first-pass screening, start with `HTML only` and use `Auto` or `JS render first` on a smaller follow-up list when needed.
+The full CSV is analyzed. HTML-only runs send 25 domains per request. Auto and JS runs send 5, so one slow page cannot stop the rest of the file. A timed-out batch is marked for review and the next batch continues. A 25k-row CSV can be uploaded at once, but the browser tab must stay open until the row count finishes. For very large first-pass screening, start with `HTML only` and use `Auto` or `JS render first` on a smaller follow-up list when needed.
 
 The app does not bypass CAPTCHA, Cloudflare challenges, paywalls, login walls, or required privacy gates. It detects those situations and flags the row for manual review.
 
