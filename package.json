@@ -1,19 +1,28 @@
 {
-  "name": "surfline-prefilter",
-  "version": "1.0.0",
+  "name": "surfline-capital-lead-checker",
+  "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "node start.js",
-    "test": "node --test test/*.test.js",
-    "trigger:dev": "npx trigger.dev@latest dev"
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "node --experimental-strip-types --test src/lib/keyword-match.test.ts"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "js-yaml": "^4.3.2"
+    "next": "^16.1.6",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   },
   "devDependencies": {
-    "@trigger.dev/build": "^4.4.1",
-    "@trigger.dev/sdk": "^4.4.1",
-    "typescript": "^5.0.0"
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20.9.0"
   }
 }
