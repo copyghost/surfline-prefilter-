@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, useMemo, useState } from "react";
+import { batchRanges } from "../lib/batches";
 
 type CsvRow = Record<string, string>;
 type OutputRow = Record<string, string | boolean | number>;
@@ -13,8 +14,11 @@ type AnalyzeResult = OutputRow & {
   consentDetected: boolean;
 };
 
-const API_BATCH_SIZE = 25;
+const HTML_BATCH_SIZE = 25;
+const JS_BATCH_SIZE = 5;
 const MAX_PREVIEW_ROWS = 500;
+const HTML_BATCH_TIMEOUT_MS = 90_000;
+const JS_BATCH_TIMEOUT_MS = 120_000;
 
 export default function Home() {
   const [rows, setRows] = useState<CsvRow[]>([]);
@@ -95,18 +99,32 @@ export default function Home() {
       let sawRenderMeta = false;
       let batchFailures = 0;
 
-      for (let start = 0; start < rows.length; start += API_BATCH_SIZE) {
-        const batchRows = rows.slice(start, start + API_BATCH_SIZE);
+      const batchSize = renderMode === "html" ? HTML_BATCH_SIZE : JS_BATCH_SIZE;
+      const ranges = batchRanges(rows.length, batchSize);
+
+      for (const [batchIndex, range] of ranges.entries()) {
+        const batchRows = rows.slice(range.start, range.end);
+        setNotice(
+          `Analyzing rows ${range.start + 1}–${range.end} of ${rows.length.toLocaleString()} (batch ${batchIndex + 1} of ${ranges.length}).`,
+        );
+        setProcessedRows(range.start);
+
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(),
+          renderMode === "html" ? HTML_BATCH_TIMEOUT_MS : JS_BATCH_TIMEOUT_MS,
+        );
 
         try {
           const response = await fetch("/api/analyze", {
             method: "POST",
+            signal: controller.signal,
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
-              rows: batchRows.map((row, batchIndex) => ({
+              rows: batchRows.map((row, offset) => ({
                 domain: row.domain,
                 original: row,
-                rowNumber: start + batchIndex + 1,
+                rowNumber: range.start + offset + 1,
               })),
               includeKeywords: keywordList(includeKeywords),
               excludeKeywords: keywordList(excludeKeywords),
@@ -117,11 +135,15 @@ export default function Home() {
           const payload = (await response.json()) as {
             results?: AnalyzeResult[];
             error?: string;
-            meta?: { jsRenderingConfigured?: boolean; renderMode?: string };
+            meta?: { jsRenderingConfigured?: boolean; renderMode?: string; processed?: number };
           };
 
           if (!response.ok || !payload.results) {
             throw new Error(payload.error || "Analysis failed.");
+          }
+
+          if (payload.results.length !== batchRows.length) {
+            throw new Error(`Server returned ${payload.results.length} of ${batchRows.length} rows.`);
           }
 
           allResults.push(...payload.results);
@@ -131,20 +153,26 @@ export default function Home() {
           }
         } catch (batchError) {
           batchFailures += 1;
+          const message =
+            batchError instanceof Error && batchError.name === "AbortError"
+              ? "Batch timed out. The remaining rows still run."
+              : batchError instanceof Error
+                ? batchError.message
+                : "Batch failed.";
           allResults.push(
-            ...batchRows.map((row, batchIndex) =>
-              failedRow(row, start + batchIndex + 1, batchError instanceof Error ? batchError.message : "Batch failed."),
-            ),
+            ...batchRows.map((row, offset) => failedRow(row, range.start + offset + 1, message)),
           );
+        } finally {
+          clearTimeout(timer);
         }
 
         setFailedBatches(batchFailures);
-        setProcessedRows(Math.min(start + batchRows.length, rows.length));
+        setProcessedRows(range.end);
         setResults([...allResults]);
       }
 
       if (renderMode !== "html" && sawRenderMeta && !jsRenderingConfigured) {
-        setNotice("JS rendering is ready in the app, but it needs BROWSERLESS_TOKEN configured on Vercel.");
+        setNotice("JS rendering needs Chrome or Chromium installed on the computer running this server.");
       } else if (batchFailures > 0) {
         setNotice(`${batchFailures} batch${batchFailures === 1 ? "" : "es"} failed and were marked for review.`);
       } else {
@@ -224,7 +252,7 @@ export default function Home() {
                 />
               </div>
               <p className="mt-2 text-xs text-[var(--muted)]">
-                Batches of {API_BATCH_SIZE} domains. Keep this tab open until the run finishes.
+                The full file runs in batches. Keep this tab open until the row count finishes.
               </p>
               {failedBatches > 0 ? (
                 <p className="mt-2 text-xs text-[var(--warning)]">
@@ -238,6 +266,9 @@ export default function Home() {
             <label className="block text-sm font-semibold" htmlFor="render-mode">
               Rendering
             </label>
+            <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+              JavaScript rendering uses Chrome installed on this computer. No Browserless account is required.
+            </p>
             <select
               id="render-mode"
               value={renderMode}

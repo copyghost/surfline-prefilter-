@@ -17,22 +17,17 @@ Open `http://localhost:3000`.
 
 The app works without extra services using normal server-side HTML fetches.
 
-For JavaScript-rendered sites, add Browserless credentials:
+When a page needs JavaScript, the server launches Chrome or Chromium installed on the same computer. Install Google Chrome locally, run `npm run dev` there, and choose `Auto` or `JS render first`. Set `CHROME_PATH` if Chrome is not on the default install path.
 
-```bash
-BROWSERLESS_TOKEN=your_token_here
-BROWSERLESS_ENDPOINT=https://chrome.browserless.io
-```
-
-On Vercel, add those as Project Settings -> Environment Variables.
+A hosted Vercel function cannot launch Chrome. Run JavaScript rendering on your own machine. Thin pages stay on the HTML result and are flagged for review when Chrome is unavailable.
 
 Rendering modes:
 
-- `Auto`: fetch HTML first, then retry with JavaScript rendering when the usable text is thin
-- `HTML only`: fastest and cheapest
-- `JS render first`: uses Browserless for every row
+- `Auto`: fetch HTML first, then retry with local Chrome when the usable text is thin
+- `HTML only`: fastest, and does not open Chrome
+- `JS render first`: opens each homepage in local Chrome
 
-Large uploads are processed in batches of 25 domains per API request. A 25k-row CSV can be uploaded at once, but the browser tab must stay open until processing finishes. For very large first-pass screening, start with `HTML only` and use `Auto` or `JS render first` on a smaller follow-up list when needed.
+The full CSV is analyzed. HTML-only runs send 25 domains per request. Auto and JS runs send 5, so one slow page cannot stop the rest of the file. A timed-out batch is marked for review and the next batch continues. A 25k-row CSV can be uploaded at once, but the browser tab must stay open until the row count finishes. For very large first-pass screening, start with `HTML only` and use `Auto` or `JS render first` on a smaller follow-up list when needed.
 
 The app does not bypass CAPTCHA, Cloudflare challenges, paywalls, login walls, or required privacy gates. It detects those situations and flags the row for manual review.
 
@@ -77,8 +72,9 @@ Any extra columns are preserved in the output.
 
 1. Push this folder to GitHub.
 2. In Vercel, import the GitHub repository.
-3. Add `BROWSERLESS_TOKEN` if you want JavaScript rendering.
-4. Keep the default Next.js settings.
-5. Deploy.
+3. Keep the default Next.js settings.
+4. Deploy.
+
+Vercel serves the HTML-only path. JavaScript rendering runs when you start the app on a computer that has Chrome installed.
 
 No environment variables are required for HTML-only mode.

@@ -7,10 +7,11 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "next lint",
-    "test": "node --experimental-strip-types --test src/lib/keyword-match.test.ts"
+    "test": "node --experimental-strip-types --test src/lib/*.test.ts"
   },
   "dependencies": {
     "next": "^16.1.6",
+    "puppeteer-core": "^25.12.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
